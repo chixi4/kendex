@@ -21,6 +21,9 @@ fn kendex(home: &Path, cwd: &Path, args: &[&str]) -> Output {
         .current_dir(cwd)
         .env_clear()
         .envs(test_util::fixture_env(home))
+        // The binary's temporary directory is this process's, so the
+        // rule it reads a folder against is the one a case here can ask.
+        .env("TMPDIR", std::env::temp_dir())
         .env("KENDEX_BACKGROUND_REFRESH", "off")
         .env("PATH", std::env::var("PATH").unwrap_or_default())
         .output()
@@ -528,6 +531,53 @@ fn a_registry_refusal_beside_an_installer_failure_keeps_its_own_lines() {
     assert!(
         !text.contains("\\n"),
         "a break printed as an escape:\n{text}"
+    );
+}
+
+/// A fixture home that is nobody's temporary folder, so its registry is a
+/// kept one and the rule applies; a project under a temporary folder is
+/// refused before the registry is touched, and the line a script keys on
+/// names the folder. Every other case here roots its home under the temp
+/// dir, which is why none of them passes the flag.
+#[test]
+#[allow(clippy::unwrap_used)]
+fn a_temporary_folder_is_refused_unless_a_throwaway_project_is_meant() {
+    let kept = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let home = rooted(&kept);
+    let env = kendex_core::env::Env::host_rooted(&home);
+    if let Some(why) = kendex_core::settings::temporary(&env, &settings_file(&home)) {
+        skipped(&format!("the fixture registry is itself temporary: {why}"));
+        return;
+    }
+    let scratch = tempfile::tempdir().unwrap();
+    let project = rooted(&scratch);
+
+    let refused = kendex(&home, &home, &["project", "add", project.to_str().unwrap()]);
+    let text = said(&refused);
+
+    assert!(!refused.status.success(), "{text}");
+    assert!(
+        text.lines()
+            .any(|line| line == format!("Error: temporary-project={}", project.display())),
+        "{text}"
+    );
+    assert!(registered(&home).is_empty(), "{text}");
+
+    let meant = kendex(
+        &home,
+        &home,
+        &["project", "add", project.to_str().unwrap(), "--throwaway"],
+    );
+
+    assert!(meant.status.success(), "{}", said(&meant));
+    assert_eq!(registered(&home), std::slice::from_ref(&project));
+    // On the list, the folder is not asked about again: the hand door's
+    // own duplicate refusal answers, not the temporary one.
+    let again = kendex(&home, &home, &["project", "add", project.to_str().unwrap()]);
+    assert!(
+        !said(&again).contains("temporary-project="),
+        "{}",
+        said(&again)
     );
 }
 
