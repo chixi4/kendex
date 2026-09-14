@@ -11,11 +11,16 @@ import {
 } from "lucide-react";
 import { useEffect } from "react";
 import { commands } from "@/bindings";
+import {
+  CLASS_TONES,
+  UPDATES_READ_ID,
+  updatesIdentity,
+} from "@/components/home/attention-rows";
 import { SidebarAccount } from "@/components/sidebar-account";
 import { SidebarNotice } from "@/components/sidebar-notice";
 import { Button } from "@/components/ui/button";
 import { UPDATES_ATTENTION_TITLE } from "@/lib/copy";
-import { unreadablePlacesLabel } from "@/lib/copy-updates";
+import { newUpdatesLabel, unreadablePlacesLabel } from "@/lib/copy-updates";
 import { scopeNames } from "@/lib/labels";
 import { SIDEBAR_ROW } from "@/lib/layout";
 import { rescanEverything } from "@/lib/rescan";
@@ -23,11 +28,19 @@ import { isSearchShortcutKey } from "@/lib/search-shortcut";
 import { visibleUpdateCount } from "@/lib/update-groups";
 import { cn } from "@/lib/utils";
 import { type Page, useNavStore } from "@/stores/nav";
+import { isRead, useReadNotices } from "@/stores/read-notices";
 import { useScanStore } from "@/stores/scan";
 import { useUpdatesStore } from "@/stores/updates";
 
 // A nav item is the shared sidebar row in the nav's own typeface.
 const NAV_ROW = `${SIDEBAR_ROW} font-mono text-sm`;
+
+// The fills the Updates badge wears, spelled whole so the stylesheet build
+// finds each class.
+const BADGE_FILLS = {
+  critical: "bg-critical/15 text-critical",
+  info: "bg-info/15 text-info",
+} as const;
 
 const NAV: { page: Page; label: string; icon: typeof Home }[] = [
   { page: "home", label: "Home", icon: Home },
@@ -45,7 +58,7 @@ export function Sidebar() {
   const scanning = useScanStore((s) => s.scanning);
   const updateCount = useUpdatesStore((s) => visibleUpdateCount(s.rows));
   // A failed check keeps the last rows, so any count shown is last-known;
-  // the badge wears the warning tone for it. With no rows at all, "?" is
+  // the badge wears the Problem tone for it. With no rows at all, "?" is
   // the honest number: absence would read as "nothing to update".
   const updatesUnchecked = useUpdatesStore((s) => s.read.error !== null);
   // A project whose records this build refuses leaves every other project's
@@ -53,6 +66,21 @@ export function Sidebar() {
   // the whole machine unchecked.
   const unreadable = useUpdatesStore((s) => s.unreadable);
   const updatesIncomplete = updatesUnchecked || unreadable.length > 0;
+  // The news the count stands for wears the Update tone until it is read,
+  // on the one slot Home's update row and the Updates page also record;
+  // once read, the count stays in the neutral fill.
+  const identity = useUpdatesStore((s) => updatesIdentity(s.rows));
+  const read = useReadNotices((s) => s.read);
+  const updatesUnread =
+    updateCount > 0 && !isRead(read, { id: UPDATES_READ_ID, identity });
+  const badgeTone = updatesIncomplete
+    ? CLASS_TONES.problem
+    : updatesUnread
+      ? CLASS_TONES.update
+      : null;
+  // Unread is said in words and weight as well as fill.
+  const unreadLabel =
+    badgeTone === CLASS_TONES.update ? newUpdatesLabel(updateCount) : undefined;
 
   // The shortcut lives in the always-mounted chrome so "/" works on every
   // page, not only the one holding the search box.
@@ -128,16 +156,20 @@ export function Sidebar() {
                       ? unreadablePlacesLabel(
                           scopeNames(unreadable.map((place) => place.scope)),
                         )
-                      : undefined
+                      : unreadLabel
                 }
                 className={cn(
                   "rounded px-1.5 py-0.5 text-[11px] font-medium tabular-nums",
-                  updatesIncomplete
-                    ? "bg-warning/15 text-warning"
-                    : "bg-foreground/[0.09]",
+                  badgeTone === null
+                    ? "bg-foreground/[0.09]"
+                    : BADGE_FILLS[badgeTone],
+                  unreadLabel !== undefined && "font-semibold",
                 )}
               >
                 {updateCount > 0 ? updateCount : "?"}
+                {unreadLabel === undefined ? null : (
+                  <span className="sr-only">{unreadLabel}</span>
+                )}
               </span>
             ) : null}
           </button>
