@@ -30,6 +30,7 @@ import {
   uncommittedInProgress,
   uncommittedNoBranch,
 } from "@/lib/copy-commit-offer";
+import { NO_PROJECTS_YET } from "@/lib/copy-harnesses";
 import { ADD_PACKAGES_LABEL, addPackagesTo } from "@/lib/copy-install";
 import { PLACE_MARKETPLACES_LABEL } from "@/lib/copy-model";
 import { lastCouldCheck } from "@/lib/copy-project-changes";
@@ -510,7 +511,7 @@ export function ProjectList() {
 
         {projects.length === 0 ? (
           <p className="py-2 text-sm text-muted-foreground">
-            No projects yet — add one to manage its tools.
+            {NO_PROJECTS_YET}
           </p>
         ) : (
           projects.map((root) => {

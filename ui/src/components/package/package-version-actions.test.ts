@@ -86,7 +86,7 @@ const answer = (parts: {
   }) as never;
 
 const HELD_IN_CLAUDE =
-  "The copy in Claude Code was left as it is — settle it on the package page";
+  "The copy in Claude Code was left as it is and is waiting on a decision from you on the package page";
 
 describe("packageVersionActions", () => {
   beforeEach(() => {
@@ -197,6 +197,8 @@ describe("packageVersionActions", () => {
     expect(vi.mocked(commands.packageSetRev).mock.calls).toEqual([
       [ref.scope, ref.kind, ref.name, null],
     ]);
-    expect(toast.success).toHaveBeenCalledWith("Now following its source");
+    expect(toast.success).toHaveBeenCalledWith(
+      "Now following the latest version",
+    );
   });
 });

@@ -109,12 +109,12 @@ describe("the Delete dialog", () => {
   it("names the package and every place the deletion reaches", async () => {
     const said = await openDialog([VG, HYPR, MINE]);
 
-    expect(said).toContain("Delete gh?");
+    expect(said).toContain("Remove gh everywhere?");
     expect(said).toContain(DELETE_PLACES_LABEL);
     expect(said).toContain("vg");
     expect(said).toContain("/work/vg");
     expect(said).toContain("hyprtrade");
-    expect(said).toContain("User level");
+    expect(said).toContain("Personal");
   });
 
   it("names all known reinstall sources without inventing an origin", async () => {

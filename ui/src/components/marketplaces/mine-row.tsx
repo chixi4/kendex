@@ -15,6 +15,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { CHECK_PASSES_BADGE, NO_PACKAGES_FOUND } from "@/lib/copy-marketplaces";
 import { worstSeverityLabel } from "@/lib/copy-safety";
 import { SEVERITY_LABELS } from "@/lib/labels";
 import { useMineStore } from "@/stores/mine";
@@ -50,7 +51,7 @@ function countsLine(row: MineRowData): string {
   if (row.bundles > 0) {
     parts.push(`${row.bundles} bundle${row.bundles === 1 ? "" : "s"}`);
   }
-  return parts.length > 0 ? parts.join(" · ") : "nothing found yet";
+  return parts.length > 0 ? parts.join(" · ") : NO_PACKAGES_FOUND;
 }
 
 function gitLine(row: MineRowData): string {
@@ -101,7 +102,7 @@ export function MineRowCard({
             ) : row.safetyFindings > 0 ? (
               <Badge variant="secondary">{findingsBadge(row)}</Badge>
             ) : (
-              <Badge variant="secondary">check passes</Badge>
+              <Badge variant="secondary">{CHECK_PASSES_BADGE}</Badge>
             )}
           </div>
           <p className="mt-0.5 truncate text-xs text-muted-foreground">
