@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # lane-mail-check: a Stop hook that blocks a lane's turn end while its overseer
-# mailbox holds unread lines. Every case builds a lane repository under
+# mailbox holds unread lines, and through the lane-mail-deliver and
+# lane-mail-halt hooks beside it hands them over after a tool call and refuses
+# one while a halt stands. Every case builds a lane repository under
 # TMP_ROOT, writes to its mailbox with the real `lane-mail`, and asserts the
 # hook's exit status and the keyed first line of stderr. HOOK_UNDER_TEST
 # overrides the script the must-fail controls at the end run against.
@@ -83,13 +85,15 @@ mark_lane() { # ITEM
 }
 
 RC=0
+# The judge's argument, empty for the turn-end run the harness makes.
+ARM_ARGS=()
 run_payload() { # RAW-JSON [ENV=VAL...]
   local payload="$1"
   shift
   RC=0
   : > "$ERR_FILE"
   printf '%s' "$payload" |
-    (cd "$LANE" && env "$@" bash "$CASE_HOOK") >"$TMP_ROOT/stdout" 2>"$ERR_FILE" || RC=$?
+    (cd "$LANE" && env "$@" bash "$CASE_HOOK" ${ARM_ARGS[@]+"${ARM_ARGS[@]}"}) >"$TMP_ROOT/stdout" 2>"$ERR_FILE" || RC=$?
 }
 
 stop() { # [ENV=VAL...]
@@ -323,12 +327,12 @@ expect 2 "lane-mail-check: unread=1" \
 # Sets MUTANT_PATH rather than printing it: the assertion below writes to the
 # same stdout a substitution would capture.
 MUTANT_PATH=""
-mutant() { # NAME SED-ARGUMENT...
+mutant() { # NAME SED-ARGUMENT... — MUTANT_SOURCE names a file other than the hook
   MUTANT_PATH="$TMP_ROOT/$1.sh"
-  local name="$1"
+  local name="$1" source="${MUTANT_SOURCE:-$HOOK}"
   shift
-  sed "$@" "$HOOK" > "$MUTANT_PATH"
-  assert_eq "$(cmp -s "$MUTANT_PATH" "$HOOK" && echo same || echo differs)" "differs" \
+  sed "$@" "$source" > "$MUTANT_PATH"
+  assert_eq "$(cmp -s "$MUTANT_PATH" "$source" && echo same || echo differs)" "differs" \
     "control: the $name mutant really differs from the hook"
 }
 
@@ -381,6 +385,181 @@ install_hook "$SHARED_MUTANT" "$TMP_ROOT/opt-control/codex/hooks/lane-mail-check
 stop "HOME=$GLOBAL_HOME"
 expect 2 "lane-mail-check: reader-outside=$LANE/.agents/skills/orch/scripts/lane-mail" \
   "control: without it a relocated harness root finds none either"
+
+# The lane-mail-deliver and lane-mail-halt hooks run the judge beside them. A
+# tool payload names the command the lane is about to run.
+install_arms() { # [JUDGE]
+  install_hook "$TEST_DIR/../lane-mail-deliver.sh" "$LANE/.claude/hooks/lane-mail-deliver.sh"
+  install_hook "$TEST_DIR/../lane-mail-halt.sh" "$LANE/.claude/hooks/lane-mail-halt.sh"
+  install_hook "${1:-$HOOK}" "$LANE/.claude/hooks/lane-mail-check.sh"
+}
+
+tool() { # ARM [COMMAND] [FIELD] — FIELD, agent_id or agent_type, marks a subagent's call
+  local judge="$CASE_HOOK"
+  CASE_HOOK="$LANE/.claude/hooks/lane-mail-$1.sh"
+  run_payload "$(jq -nc --arg c "${2:-git status}" --arg f "${3:-}" \
+    '{tool_name: "Bash", tool_input: {command: $c}} + (if $f == "" then {} else {($f): "dev-1"} end)')"
+  CASE_HOOK="$judge"
+}
+
+# The event a deliver run's JSON names and the first line of the context it
+# carries; `-` for no output.
+context_line() {
+  [ -s "$TMP_ROOT/stdout" ] || { echo -; return; }
+  jq -r '"\(.hookSpecificOutput.hookEventName) \(.hookSpecificOutput.additionalContext | split("\n")[0])"' "$TMP_ROOT/stdout"
+}
+
+new_lane arms ken-30
+install_arms
+send KEN-30 'Rebase first.'
+tool halt
+expect 0 - "an unread directive that is no halt passes the tool call"
+tool deliver
+assert_eq "RC=$RC context=$(context_line) stderr=$(first_line)" \
+  "RC=0 context=PostToolUse lane-mail-check: unread=1 stderr=-" \
+  "a directive reaches a working lane in the context its next tool call's hook output carries"
+assert_eq "$(jq -r '.hookSpecificOutput.additionalContext' "$TMP_ROOT/stdout" | grep -cF 'Rebase first.')" "1" \
+  "that context carries the directive itself"
+tool deliver
+assert_eq "RC=$RC context=$(context_line)" "RC=0 context=-" "a finished tool call with nothing unread carries nothing"
+
+send KEN-30 'Stop pushing.' --halt
+HALT_ID=$(jq -r 'select(.halt == true) | .id' "$LANE/tmp/lane-mail/KEN-30/to-lane.jsonl")
+printf -v READ_HALT '%q inbox --item %q' "$LANE/.claude/skills/orch/scripts/lane-mail" KEN-30
+tool halt
+expect 2 "lane-mail-check: halt=$HALT_ID" "an unread halt refuses the next tool call"
+assert_eq "directive=$(grep -cF 'Stop pushing.' "$ERR_FILE") command=$(grep -cxF -- "$READ_HALT" "$ERR_FILE")" \
+  "directive=1 command=1" "the halt refusal carries the directive and the one command that reads it"
+tool deliver
+tool halt
+expect 2 "lane-mail-check: halt=$HALT_ID" "a deliver run leaves the halt standing"
+stop
+tool halt
+expect 2 "lane-mail-check: halt=$HALT_ID" "a stop run leaves the halt standing"
+tool halt "$READ_HALT"
+expect 0 - "the one command that reads the halt passes while it stands"
+"$LANE_MAIL" inbox --item KEN-30 --root "$LANE" >/dev/null
+tool halt
+expect 0 - "a halt read by the inbox passes"
+
+# Lane mail is the lead's: a subagent's call, marked by either field a harness
+# sends, neither takes it nor clears a halt.
+for row in agent_id:KEN-36 agent_type:KEN-37; do
+  field=${row%%:*} item=${row#*:}
+  new_lane "sub_$field" "$(printf '%s' "$item" | tr 'A-Z' 'a-z')"
+  install_arms
+  send "$item" 'Rebase again.'
+  tool deliver "git status" "$field"
+  tool deliver
+  assert_eq "RC=$RC context=$(context_line)" "RC=0 context=PostToolUse lane-mail-check: unread=1" \
+    "a subagent's call marked by $field leaves the directive unread for the lead's next call"
+  send "$item" 'Stop again.' --halt
+  SUB_HALT=$(jq -r 'select(.halt == true) | .id' "$LANE/tmp/lane-mail/$item/to-lane.jsonl")
+  printf -v SUB_READ '%q inbox --item %q' "$LANE/.claude/skills/orch/scripts/lane-mail" "$item"
+  tool halt "$SUB_READ" "$field"
+  expect 2 "lane-mail-check: halt=$SUB_HALT" \
+    "a subagent's call marked by $field carrying the acknowledging command is refused while a halt stands"
+  tool halt
+  expect 2 "lane-mail-check: halt=$SUB_HALT" "the halt still stands for the lead after the $field refusal"
+done
+
+ARM_ARGS=(bogus)
+stop
+ARM_ARGS=()
+expect 2 "lane-mail-check: arm=bogus" "an arm the judge does not know is refused"
+rm -f "$LANE/.claude/hooks/lane-mail-check.sh"
+for name in deliver halt; do
+  tool "$name"
+  expect 2 "lane-mail-$name: judge=$LANE/.claude/hooks/lane-mail-check.sh" \
+    "the $name hook with no judge beside it refuses, never passes"
+done
+
+# The halt refusal replaced by a pass, its judgement still made.
+mutant no-halt -e 's@^  refuse halt "\$HALT_ID"$@  exit 0@'
+new_lane control_halt ken-31
+install_arms "$MUTANT_PATH"
+send KEN-31 'Stop.' --halt
+tool halt
+expect 0 - "control: without its halt refusal the hook passes a tool call with a halt pending"
+
+# Each arm's subagent check removed alone: a subagent's call is judged as the lead's.
+mutant lead-deliver -e 's@^if \[ "\$ARM" = deliver \] && \[ "\$CALLER" = subagent \]; then$@if false; then@'
+new_lane control_sub_deliver ken-34
+install_arms "$MUTANT_PATH"
+send KEN-34 'For the lead.'
+tool deliver "git status" agent_id
+tool deliver
+assert_eq "RC=$RC context=$(context_line)" "RC=0 context=-" \
+  "control: without the deliver check a subagent's call consumes the lead's directive"
+mutant lead-halt -e 's@^  if \[ "\$CALLER" = lead \]; then$@  if true; then@'
+new_lane control_sub_halt ken-35
+install_arms "$MUTANT_PATH"
+send KEN-35 'Halt the lead.' --halt
+printf -v SUB_READ '%q inbox --item %q' "$LANE/.claude/skills/orch/scripts/lane-mail" KEN-35
+tool halt "$SUB_READ" agent_id
+expect 0 - "control: without the halt check a subagent's call carrying the acknowledging command passes"
+
+# The agent_type read dropped, agent_id still read: a subagent the pi-hooks
+# carrier marks is judged as the lead.
+mutant no-agent-type -e 's@str(\.agent_id) + str(\.agent_type) == ""@str(.agent_id) == ""@'
+new_lane control_sub_type ken-38
+install_arms "$MUTANT_PATH"
+send KEN-38 'For the lead.'
+tool deliver "git status" agent_type
+tool deliver
+assert_eq "RC=$RC context=$(context_line)" "RC=0 context=-" \
+  "control: without the agent_type read a subagent's call consumes the lead's directive"
+send KEN-38 'Halt the lead.' --halt
+printf -v SUB_READ '%q inbox --item %q' "$LANE/.claude/skills/orch/scripts/lane-mail" KEN-38
+tool halt "$SUB_READ" agent_type
+expect 0 - "control: without the agent_type read a subagent's call carrying the acknowledging command passes"
+
+# The deliver context written without its envelopes, the keyed line kept.
+mutant no-envelopes -e 's@^  NOTICE=\$(message unread "\$COUNT" 2>&1)$@  NOTICE=$(UNREAD= message unread "$COUNT" 2>\&1)@'
+new_lane control_envelopes ken-39
+install_arms "$MUTANT_PATH"
+send KEN-39 'Rebase first.'
+tool deliver
+assert_eq "context=$(context_line) carried=$(jq -r '.hookSpecificOutput.additionalContext' "$TMP_ROOT/stdout" | grep -cF 'Rebase first.')" \
+  "context=PostToolUse lane-mail-check: unread=1 carried=0" \
+  "control: without its envelopes the deliver context keeps its key and loses the directive"
+
+# The halt refusal written without the acknowledging command.
+mutant no-ack-command -e 's@"\$ACK_COMMAND" "\$HALT_TEXT"@"" "$HALT_TEXT"@'
+new_lane control_ack_command ken-41
+install_arms "$MUTANT_PATH"
+send KEN-41 'Stop pushing.' --halt
+printf -v ACK_READ '%q inbox --item %q' "$LANE/.claude/skills/orch/scripts/lane-mail" KEN-41
+tool halt
+assert_eq "key=$(first_line | cut -d= -f1) command=$(grep -cxF -- "$ACK_READ" "$ERR_FILE")" \
+  "key=lane-mail-check: halt command=0" \
+  "control: without the command the halt refusal keeps its key and loses the one read that clears it"
+
+# The reader's acknowledgement clamp removed: a deliver run consumes the halt it showed.
+CLAMPLESS="$TMP_ROOT/clampless"
+mkdir -p "$CLAMPLESS"
+ln -s "$REPO_ROOT/skills/orch/scripts/lib" "$CLAMPLESS/lib"
+MUTANT_SOURCE="$LANE_MAIL" mutant no-clamp \
+  -e 's@^      \[ -z "\$HALT_AT" \] || \[ "\$ACK" -le "\$HALT_AT" \] || ACK="\$HALT_AT"$@      :@'
+mv "$MUTANT_PATH" "$CLAMPLESS/lane-mail"
+chmod +x "$CLAMPLESS/lane-mail"
+new_lane control_clamp ken-32
+install_arms
+ln -s -f -n "$CLAMPLESS" "$LANE/.agents/skills/orch/scripts"
+send KEN-32 'Stop.' --halt
+tool deliver
+tool halt
+expect 0 - "control: without the acknowledgement clamp a deliver run consumes the halt"
+
+# The missing-judge refusal's exit removed, its message still written.
+MUTANT_SOURCE="$TEST_DIR/../lane-mail-halt.sh" mutant no-judge-exit -e 's@^  exit 2$@  :@'
+new_lane control_judge ken-33
+install_arms
+install_hook "$MUTANT_PATH" "$LANE/.claude/hooks/lane-mail-halt.sh"
+rm -f "$LANE/.claude/hooks/lane-mail-check.sh"
+tool halt
+assert_eq "$([ "$RC" -eq 2 ] && echo refused || echo passed)" "passed" \
+  "control: without its exit the halt hook with no judge beside it does not refuse"
 
 printf 'pass: %d   fail: %d\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
