@@ -4,7 +4,7 @@
 # mailbox files and the keyed first line of any refusal; the hosted cases cross
 # tests/fixtures/lane-host in its directory-backed mode. The must-fail controls
 # close the file, one per surface: the partial last line, the inbox cursor,
-# inbox --after and the already-answered drain filter.
+# inbox --after, the already-answered drain filter and the one-spelling rule.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib/git-env.sh"
 
@@ -13,6 +13,13 @@ LANE_MAIL="$REPO_ROOT/skills/orch/scripts/lane-mail"
 FIXTURE_HOST="$REPO_ROOT/skills/orch/tests/fixtures/lane-host"
 TMP_ROOT="$(mktemp -d)"
 trap 'rm -rf -- "$TMP_ROOT"' EXIT
+
+# Whether this world can hold two names differing only in case. On a
+# case-insensitive filesystem, every macOS default one, the second name is the
+# first directory, so neither the split mailbox nor its refusal can be built.
+mkdir -p "$TMP_ROOT/case-probe/A"
+CASE_SENSITIVE=1
+[ ! -d "$TMP_ROOT/case-probe/a" ] || CASE_SENSITIVE=0
 
 PASS=0
 FAIL=0
@@ -266,6 +273,32 @@ lm send --item KEN-1 --root "$LANE" --directive --file "$(text d 'Through a link
 lm inbox --item KEN-1 --root "$LANE"
 assert_eq "$RC=$(jq -r '.text' <<<"$OUT")" "0=Through a linked tmp." "a tmp directory linked elsewhere still carries the mailbox"
 
+# One spelling per lane, in the two states that decide it. The lane opens its own
+# mailbox lower case and the overseer sends to the upper-case name: a send that
+# would open the second folder is refused, and a send to a folder already there
+# is not, which is how a pair an earlier launcher left is drained and cleared.
+# Fields: whether the upper-case folder is planted, the exit and first stderr
+# line, the directives that folder then holds, and the row's name. A row plants
+# that folder rather than opening it, because opening one is what the tool
+# refuses. The count is what the verb decided: a refusal writes none, and a send
+# that goes through writes one, into the folder it names rather than the lane's.
+if [ "${CASE_SENSITIVE:?}" -eq 1 ]; then
+  for row in 'no|2=lane-mail: item-case-variant=KEN-1|0|opening the second spelling is refused' \
+    'yes|0=|1|a send to a spelling already there is not refused'; do
+    IFS='|' read -r plant want held name <<<"$row"
+    new_lane "case_variant_$plant"
+    lm notice --item ken-1 --file "$(text lane 'lane side')"
+    [ "$plant" = no ] || mkdir -p -- "$LANE/tmp/lane-mail/KEN-1"
+    lm send --item KEN-1 --root "$LANE" --directive --file "$(text overseer 'overseer side')"
+    COUNT=0
+    [ ! -f "$LANE/tmp/lane-mail/KEN-1/to-lane.jsonl" ] ||
+      COUNT="$(awk 'END { print NR }' < "$LANE/tmp/lane-mail/KEN-1/to-lane.jsonl")"
+    assert_eq "$RC=$ERR=$COUNT" "$want=$held" "$name"
+  done
+else
+  printf '  skip  the one-spelling rule: this filesystem is case-insensitive, so the second name is the first mailbox\n'
+fi
+
 # The remote root exists nowhere on this disk, so a case that silently fell
 # back to the local root would read an empty mailbox instead.
 new_lane hosted
@@ -436,6 +469,17 @@ assert_eq "$ACK_CURSOR" "0=1" "control: without the forward-only rule a stale --
 mutant unsafe-component 's@^    { \[ ! -L "\$path" \] && { \[ ! -e "\$path" \] || test "\$kind" "\$path"; }; } || refuse mailbox-unsafe "\$path"$@    :@'
 unsafe_inbox link KEN-1/to-lane.jsonl
 assert_eq "${UNSAFE%%=*}" "0" "control: without the component rule an inbox reads through a planted link"
+
+if [ "${CASE_SENSITIVE:?}" -eq 1 ]; then
+  mutant case-variant-allowed 's@^\[ "\$HOST" -eq 1 \] || lm_one_spelling$@:@'
+  new_lane control_case_variant
+  LANE_MAIL_BIN="$LANE_MAIL" lm notice --item ken-1 --file "$(text lane 'lane side')"
+  LANE_MAIL_BIN="$MUTANT_DIR/case-variant-allowed" lm send --item KEN-1 --root "$LANE" --directive --file "$(text overseer 'overseer side')"
+  assert_eq "$RC=$([ -d "$LANE/tmp/lane-mail/KEN-1" ] && echo made || echo absent)" "0=made" \
+    "control: without the one-spelling check the second spelling opens its own mailbox"
+else
+  printf '  skip  control for the one-spelling rule: this filesystem cannot hold the second mailbox\n'
+fi
 
 mutant answered-ignored 's@index(\$envelope\.id)@index("no-such-id")@'
 new_lane control_answered
