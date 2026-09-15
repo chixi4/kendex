@@ -8,7 +8,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{SecretEntry, TemplateEntry, TemplateFinding, TemplateRead};
+use super::{
+    SecretEntry, TemplateEntry, TemplateFinding, TemplateRead, VALUES_PREFIX, values_line,
+};
 
 /// The table a template declares its credentials under. Named once: the
 /// scan, the findings it writes and the authoring guide all spell it from
@@ -165,6 +167,9 @@ pub(super) fn scan(text: &str) -> (TemplateRead, BTreeSet<u32>) {
     walk.read
         .secrets
         .retain(|secret| !conflicted.contains(&secret.key));
+    // In file order. The walk runs in it, but a key's comment block sits
+    // above its assignment and carries findings of its own.
+    walk.read.findings.sort_by_key(|finding| finding.line);
     (walk.read, walk.syntax)
 }
 
@@ -260,9 +265,20 @@ impl Walk {
         let (value, problems) =
             decode_entry(written.trim(), spelled.quoted, line, decoded, &taken, at);
         self.read.findings.extend(problems);
+        // Only an [env] key has a default to hold a list to, and only an
+        // [env] row reaches the app's picker, so under [secrets] a
+        // `values:` line is the prose the rest of the block is.
+        let (values, refusals) = match at {
+            Table::Env => declared_values(key, value.as_deref(), &taken),
+            Table::Secrets | Table::Other => (Vec::new(), Vec::new()),
+        };
+        let listed = refusals.is_empty();
+        self.read.findings.extend(refusals);
         // The first assignment of this key is already the row; a later one
-        // that happens to decode is still a line to delete.
-        let Some(value) = value.filter(|_| duplicate.is_none()) else {
+        // that happens to decode is still a line to delete. A list nothing
+        // can pick from takes the row with it: a picker whose options the
+        // file's own value is missing from is the defect, not the fallback.
+        let Some(value) = value.filter(|_| duplicate.is_none() && listed) else {
             return;
         };
         match at {
@@ -271,6 +287,7 @@ impl Walk {
                 comment_span: (taken[0].0, taken[taken.len() - 1].0),
                 comment: taken.into_iter().map(|(_, text)| text).collect(),
                 value,
+                values,
                 line,
             }),
             // Nothing of the value survives into a secret row: the only
@@ -397,6 +414,115 @@ fn marker_after_value(line: u32, key: &str, said: &str) -> Option<TemplateFindin
             "write `# {marker}` where the consumer must decide the key, and nothing after the value otherwise"
         ),
     })
+}
+
+/// The values a key's comment block declares, in the order it lists them,
+/// and whatever is wrong with the declaration. A block carrying no values
+/// line declares none and is no finding: that is every key written before
+/// the line existed, and the app types those as free text.
+///
+/// A block declares its values on one line. A second declaration is
+/// refused on its own terms, before its items are read, so an author who
+/// spread a list over two lines is told that rather than told four
+/// separate things about the items on the second.
+///
+/// Four more declarations are refused, and each would put an option in
+/// front of a person that the file cannot hold or cannot be picked from:
+/// an empty item, which a bar at either end or a doubled bar makes without
+/// anybody typing one; an item the `[env]` value grammar refuses, which
+/// the app would offer and the save would then refuse with its own words;
+/// a value the list names twice; and a default the list does not name.
+/// Each takes the row with it, so nothing downstream draws a picker over a
+/// list its author has not settled.
+///
+/// The order inside the loop is the order a person needs: an empty item is
+/// reported as the empty item it is rather than as a duplicate of the last
+/// empty one, and a line of bare bars says so once rather than once per
+/// bar. The grammar is [`crate::settings_file::check_value`]'s, asked
+/// rather than copied, because a values line is a comment and the quoted
+/// decode that judges a default never reaches it.
+///
+/// What this does not reach is the spelling: a line saying `Values:` or
+/// `value:` declares nothing and the key stays free text, the way any
+/// other comment line does.
+fn declared_values(
+    key: &str,
+    default: Option<&str>,
+    comment: &[(u32, String)],
+) -> (Vec<String>, Vec<TemplateFinding>) {
+    let declared: Vec<(u32, &str)> = comment
+        .iter()
+        .filter_map(|(line, said)| Some((*line, values_line(said)?)))
+        .collect();
+    let Some((first, listed)) = declared.first().copied() else {
+        return (Vec::new(), Vec::new());
+    };
+    let mut problems: Vec<TemplateFinding> = declared[1..]
+        .iter()
+        .map(|(line, _)| TemplateFinding {
+            line: *line,
+            problem: format!(
+                "{key} declares its values again; they are already declared on line {first}"
+            ),
+            fix: format!(
+                "keep one `# {VALUES_PREFIX}` line and list every value the key takes on it"
+            ),
+        })
+        .collect();
+    let mut values: Vec<String> = Vec::new();
+    let mut empty = false;
+    for said in listed.split('|').map(str::trim) {
+        if said.is_empty() {
+            if !empty {
+                empty = true;
+                problems.push(TemplateFinding {
+                    line: first,
+                    problem: format!("{key}'s values line has an empty value"),
+                    fix: values_fix(),
+                });
+            }
+            continue;
+        }
+        if let Err(refused) = crate::settings_file::check_value(said) {
+            problems.push(TemplateFinding {
+                line: first,
+                problem: format!(
+                    "{key} lists `{}` among its values, and {refused}",
+                    said.escape_debug()
+                ),
+                fix: "declare only values a default could carry; one the file cannot hold is one the app offers and the save refuses".to_owned(),
+            });
+            continue;
+        }
+        if values.iter().any(|value| value == said) {
+            problems.push(TemplateFinding {
+                line: first,
+                problem: format!("{key} lists `{said}` twice among the values it takes"),
+                fix: values_fix(),
+            });
+            continue;
+        }
+        values.push(said.to_owned());
+    }
+    if let Some(default) = default
+        && !values.iter().any(|value| value == default)
+    {
+        problems.push(TemplateFinding {
+            line: first,
+            problem: format!("{key}'s default `{default}` is not one of the values it takes"),
+            fix: format!(
+                "list the default among the values on the `# {VALUES_PREFIX}` line, or make the default one of them"
+            ),
+        });
+    }
+    (values, problems)
+}
+
+/// The shape a values line takes, for the refusals about how it is written.
+fn values_fix() -> String {
+    format!(
+        "write each value once, as `# {VALUES_PREFIX} a | b | c`, with no bar at either end and none doubled"
+    )
 }
 
 /// Everything wrong with one assignment, and the decoded value where

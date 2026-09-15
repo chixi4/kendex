@@ -253,6 +253,10 @@ fn catalog_shipping(home: &Path, template: &str) -> std::path::PathBuf {
     catalog
 }
 
+/// One defect the settings pass names: what it is, the template shipping
+/// it, whether the check passes, and the lines it must say.
+type SettingsDefect = (&'static str, String, bool, Vec<String>);
+
 /// What the marketplace check says about a settings template, one row per
 /// template. A malformed one fails with each defect at the line it sits on
 /// and the fix under it. A marker on a comment line of its own fails in
@@ -267,6 +271,32 @@ fn catalog_shipping(home: &Path, template: &str) -> std::path::PathBuf {
 #[test]
 #[allow(clippy::unwrap_used)]
 fn the_settings_template_check_names_each_defect_at_its_line() {
+    for (what, template, passes, says) in settings_template_defects() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = rooted(&tmp);
+        let home = home.as_path();
+        let catalog = catalog_shipping(home, &template);
+
+        let output = kendex(
+            home,
+            home,
+            &["marketplace", "check", catalog.to_str().unwrap()],
+        );
+
+        let said = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert_eq!(output.status.success(), passes, "{what}: {said}");
+        for line in &says {
+            assert!(said.contains(line), "{what}: {line:?} is missing: {said}");
+        }
+        if passes {
+            assert!(!said.contains("settings:"), "{what}: {said}");
+        }
+    }
+}
+
+/// One row per defect class: what it is, the template shipping it, whether
+/// the check passes, and the lines it must say.
+fn settings_template_defects() -> [SettingsDefect; 13] {
     let marker = |said_as: &str| {
         format!("[env]\n\n# The team every write targets.\n# {said_as}\nTEAM = \"\"\n")
     };
@@ -278,8 +308,13 @@ fn the_settings_template_check_names_each_defect_at_its_line() {
             "fix: write the marker after the value it marks".to_owned(),
         ]
     };
-    type Row = (&'static str, String, bool, Vec<String>);
-    let rows: [Row; 8] = [
+    // A `# values:` line the author has not settled offers a picker the
+    // file's own value is missing from, so the check refuses it by key and
+    // by line the same way.
+    let values = |line: &str, default: &str| {
+        format!("[env]\n\n# How the gate answers.\n# {line}\nMODE = \"{default}\"\n")
+    };
+    [
         (
             "two defects",
             "[env]\n# How long to wait.\nWAIT = \"900\"\n\nDEPTH = \"2\"\n\n[env]\n# Again.\nMODE = 3\n".to_owned(),
@@ -312,33 +347,57 @@ fn the_settings_template_check_names_each_defect_at_its_line() {
             marks_nothing("required\\u{200b}"),
         ),
         (
+            "a default the values line does not list",
+            values("values: enforce | advise", "off"),
+            false,
+            vec![
+                "settings: skills/review/kendex.settings.toml.example:4: MODE's default `off` is not one of the values it takes".to_owned(),
+                "fix: list the default among the values".to_owned(),
+            ],
+        ),
+        (
+            "a values line naming one value twice",
+            values("values: enforce | advise | enforce", "enforce"),
+            false,
+            vec![
+                "settings: skills/review/kendex.settings.toml.example:4: MODE lists `enforce` twice among the values it takes".to_owned(),
+                "fix: write each value once".to_owned(),
+            ],
+        ),
+        (
+            "a values line with an empty value",
+            values("values: enforce | advise |", "enforce"),
+            false,
+            vec![
+                "settings: skills/review/kendex.settings.toml.example:4: MODE's values line has an empty value".to_owned(),
+                "fix: write each value once".to_owned(),
+            ],
+        ),
+        (
+            "a values line naming a value the grammar refuses",
+            values("values: enforce | ad\\vise", "enforce"),
+            false,
+            vec![
+                "settings: skills/review/kendex.settings.toml.example:4: MODE lists `ad\\\\vise` among its values, and there are no escapes here".to_owned(),
+                "fix: declare only values a default could carry".to_owned(),
+            ],
+        ),
+        (
+            "a second values line",
+            "[env]\n\n# How the gate answers.\n# values: enforce\n# values: advise\nMODE = \"enforce\"\n".to_owned(),
+            false,
+            vec![
+                "settings: skills/review/kendex.settings.toml.example:5: MODE declares its values again; they are already declared on line 4".to_owned(),
+                "fix: keep one `# values:` line".to_owned(),
+            ],
+        ),
+        (
             "nothing wrong",
             "[env]\n\n# How long to wait.\n# required for CI, though nothing here marks anything.\nWAIT = \"900\"\n".to_owned(),
             true,
             vec![],
         ),
-    ];
-    for (what, template, passes, says) in rows {
-        let tmp = tempfile::tempdir().unwrap();
-        let home = rooted(&tmp);
-        let home = home.as_path();
-        let catalog = catalog_shipping(home, &template);
-
-        let output = kendex(
-            home,
-            home,
-            &["marketplace", "check", catalog.to_str().unwrap()],
-        );
-
-        let said = String::from_utf8_lossy(&output.stderr).into_owned();
-        assert_eq!(output.status.success(), passes, "{what}: {said}");
-        for line in &says {
-            assert!(said.contains(line), "{what}: {line:?} is missing: {said}");
-        }
-        if passes {
-            assert!(!said.contains("settings:"), "{what}: {said}");
-        }
-    }
+    ]
 }
 
 /// `file` is a path something opens: the Mine row joins it to the

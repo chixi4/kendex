@@ -1,9 +1,15 @@
 // @vitest-environment jsdom
 import userEvent from "@testing-library/user-event";
 import type React from "react";
+import { act } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import type { ScopeSettings, SettingsRow, SkillTemplate } from "@/bindings";
+import type {
+  ScopeSettings,
+  SettingsEdit,
+  SettingsRow,
+  SkillTemplate,
+} from "@/bindings";
 import {
   CONTESTED_KEYS,
   SECRETS_NEED_A_PROJECT,
@@ -25,6 +31,7 @@ const row = (over: Partial<SettingsRow> = {}): SettingsRow => ({
   key: "GH_MODE",
   explainer: ["How the gate answers.", "One of enforce or advise."],
   default: "enforce",
+  values: [],
   current: { state: "value", value: "enforce", line: 3 },
   ...over,
 });
@@ -58,6 +65,39 @@ const publicRows = (rows: SettingsRow[]): SkillTemplate => ({
 // every assertion here reads the markup with them put back.
 const markup = (element: React.ReactElement): string =>
   renderToStaticMarkup(element).replaceAll("&#x27;", "'");
+
+/** The section on screen, for a case that reads the DOM or clicks. */
+const mounted = (
+  settings: ScopeSettings | null,
+  onEdit: (edit: SettingsEdit) => void = () => {},
+) =>
+  mount(
+    <SkillSettings
+      skill="gh"
+      settings={settings}
+      edits={[]}
+      secretEdits={[]}
+      pickedFile={null}
+      onEdit={onEdit}
+      onSecretEdit={() => {}}
+      onSecretEdits={() => {}}
+      onPickFile={() => {}}
+    />,
+  );
+
+/** Open this picker and return the options it offers. A base-ui trigger
+ *  does not open on a click under jsdom, and every popup is portaled to
+ *  the document, so what a case left open is still there: only the options
+ *  this open added come back. */
+const opened = async (trigger: HTMLElement): Promise<HTMLElement[]> => {
+  const already = new Set(document.querySelectorAll('[role="option"]'));
+  act(() => trigger.focus());
+  await userEvent.keyboard("{Enter}");
+  return [...document.querySelectorAll('[role="option"]')].filter(
+    (one): one is HTMLElement =>
+      one instanceof HTMLElement && !already.has(one),
+  );
+};
 
 const render = (settings: ScopeSettings | null) =>
   markup(
@@ -366,6 +406,150 @@ describe("SkillSettings", () => {
     expect(html).toContain(secretsHelpRefused(".env.local"));
     expect(html).not.toContain(secretsHelp(".env.local"));
     expect(html).not.toMatch(/git does not carry/);
+  });
+
+  /// A key whose template lists the values it takes is picked from, not
+  /// typed into: a typo in a two-value setting is refused by the script
+  /// that reads it, hours later and somewhere else. The list is the
+  /// template's, in the template's order.
+  ///
+  /// jsdom lays nothing out, so nothing here asserts the picker's width
+  /// or where it sits.
+  it("picks a key that declares its values, and types every other key", async () => {
+    const onEdit = vi.fn();
+    const container = mounted(
+      place(
+        publicRows([
+          row({
+            values: ["enforce", "advise"],
+            current: { state: "value", value: "advise", line: 3 },
+          }),
+          row({
+            key: "GH_GLOB",
+            default: "**/*.rs",
+            current: { state: "absent" },
+          }),
+        ]),
+      ),
+      onEdit,
+    );
+    const triggers = container.querySelectorAll<HTMLElement>(
+      '[data-slot="select-trigger"]',
+    );
+    expect(triggers).toHaveLength(1);
+    expect(triggers[0].textContent).toContain("advise");
+    // The key with no values line keeps the box a person types into, and
+    // the picked key offers none. A picker carries a hidden input of its
+    // own for form participation, which is not a box anybody reaches.
+    expect(
+      [...container.querySelectorAll("input:not([aria-hidden])")].map((one) =>
+        one.getAttribute("aria-label"),
+      ),
+    ).toEqual(["GH_GLOB"]);
+
+    const options = await opened(triggers[0]);
+    expect(options.map((one) => one.textContent)).toEqual([
+      "enforce",
+      "advise",
+    ]);
+    await userEvent.click(options[0]);
+    expect(onEdit).toHaveBeenLastCalledWith({
+      skill: "gh",
+      key: "GH_MODE",
+      value: { kind: "set", value: "enforce" },
+    });
+  });
+
+  /// The file's own answer stays on screen and stays in the file. A
+  /// picker that dropped a value the template does not list would show a
+  /// value the file does not hold; one that snapped to the default would
+  /// rewrite somebody's answer the moment the page was read.
+  it("shows a value outside the declared set as its own disabled option", async () => {
+    const onEdit = vi.fn();
+    const container = mounted(
+      place(
+        publicRows([
+          row({
+            values: ["enforce", "advise"],
+            current: { state: "value", value: "Enforce", line: 3 },
+          }),
+        ]),
+      ),
+      onEdit,
+    );
+    const trigger = container.querySelector<HTMLElement>(
+      '[data-slot="select-trigger"]',
+    );
+    if (!trigger) throw new Error("the row rendered no picker");
+    expect(trigger.textContent).toContain("Enforce");
+
+    const options = await opened(trigger);
+    expect(options.map((one) => one.textContent)).toEqual([
+      "Enforce",
+      "enforce",
+      "advise",
+    ]);
+    expect(options[0].dataset.disabled).toBeDefined();
+    expect(onEdit).not.toHaveBeenCalled();
+  });
+
+  /// An empty value is a real answer for some keys, and a blank row is one
+  /// nobody can tell from a rendering fault. The labels are written out
+  /// here rather than read back from the copy the row uses, so a label
+  /// that collides with another option's is a case this can fail on: core
+  /// keeps a double quote out of every value the picker can hold, which is
+  /// what makes a pair of them a label nothing else produces.
+  it("labels every option so no two of them read alike", async () => {
+    const rows: [string, SettingsRow, string[]][] = [
+      [
+        "an empty value among the declared ones",
+        row({
+          default: "",
+          values: ["", "enforce"],
+          current: { state: "absent" },
+        }),
+        ['""', "enforce"],
+      ],
+      [
+        "an empty current value beside a declared literal empty",
+        row({
+          values: ["empty", "enforce"],
+          current: { state: "value", value: "", line: 3 },
+        }),
+        ['""', "empty", "enforce"],
+      ],
+      [
+        "a trailing-space current value beside the value it looks like",
+        row({
+          default: "on",
+          values: ["on", "off"],
+          current: { state: "value", value: "on ", line: 3 },
+        }),
+        ["on\\s", "on", "off"],
+      ],
+      [
+        "two declared values differing only in their interior whitespace",
+        row({
+          default: "a b",
+          values: ["a\tb", "a b"],
+          current: { state: "absent" },
+        }),
+        ["a\\tb", "a b"],
+      ],
+    ];
+    expect(rows).toHaveLength(4);
+    for (const [what, one, labels] of rows) {
+      const container = mounted(place(publicRows([one])));
+      const trigger = container.querySelector<HTMLElement>(
+        '[data-slot="select-trigger"]',
+      );
+      if (!trigger) throw new Error(`${what}: the row rendered no picker`);
+      const options = await opened(trigger);
+      expect(
+        options.map((option) => option.textContent),
+        what,
+      ).toEqual(labels);
+    }
   });
 
   /// A key one package declares a setting and another a credential is

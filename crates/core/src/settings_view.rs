@@ -29,7 +29,7 @@ use crate::error::Result;
 use crate::model::Scope;
 use crate::settings_file::{Current, Site, current_of, sites};
 use crate::settings_secret::{ContestedKey, SecretRow, SecretsRead, SecretsView};
-use crate::settings_template::{TemplateFinding, TemplateSource, read};
+use crate::settings_template::{TemplateFinding, TemplateSource, read, values_line};
 
 /// One skill's settings, in whichever of the four states it is in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -63,6 +63,10 @@ pub struct SettingsRow {
     /// author wrote to explain the key.
     pub explainer: Vec<String>,
     pub default: String,
+    /// The values the template's `# values:` line lists, in the order it
+    /// offers them. Empty where the key declares none, which is the key
+    /// whose value a person types.
+    pub values: Vec<String>,
     /// Only a [`Current::Value`] is comparable with `default`; the other
     /// two say what is in the way instead.
     pub current: Current,
@@ -180,8 +184,18 @@ fn template_of(
             .map(|entry| SettingsRow {
                 current: current_of(sites, &entry.key),
                 key: entry.key,
-                explainer: entry.comment,
+                // The values line is the grammar, not the author's
+                // explanation: seeding copies it into the consumer's file
+                // with the rest of the block, and a picker already
+                // offering the values does not need the syntax that
+                // declared them read out beside it.
+                explainer: entry
+                    .comment
+                    .into_iter()
+                    .filter(|said| values_line(said).is_none())
+                    .collect(),
                 default: entry.value,
+                values: entry.values,
             })
             .collect(),
         secrets: private.rows(

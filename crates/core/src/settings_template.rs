@@ -16,9 +16,9 @@
 //! one double-quoted string free of `"` and `\`, and after that value
 //! nothing but the required marker. A line those loaders refuse or
 //! silently skip is a finding here, as are the rules only a template has —
-//! a comment block over every key, nothing assigned outside the two
-//! tables it may declare, and
-//! that marker, whose spelling `crate::settings_seed::marks_required`
+//! a comment block over every key, the optional `# values:` line inside
+//! one, nothing assigned outside the two tables it may declare, and that
+//! marker, whose spelling `crate::settings_seed::marks_required`
 //! decides for seeder and check alike. The corpus in
 //! `crates/core/tests/fixtures/settings-grammar.tsv` runs reader and
 //! loaders against the same samples, so the two cannot drift apart unseen.
@@ -87,6 +87,10 @@ pub struct TemplateEntry {
     /// The default with its quotes removed. There are no escapes to
     /// decode: a value carrying `"` or `\` is a finding, not a row.
     pub value: String,
+    /// The values the comment block's `# values:` line lists, in the order
+    /// it lists them. Empty where the block carries no such line, which is
+    /// a key whose value is free text.
+    pub values: Vec<String>,
     /// 1-based first and last line of the comment block.
     pub comment_span: (u32, u32),
     /// 1-based line the assignment sits on.
@@ -136,6 +140,23 @@ pub fn is_env_name(key: &str) -> bool {
         .next()
         .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// How a comment block says a key takes one of a fixed set of values.
+const VALUES_PREFIX: &str = "values:";
+
+/// The bar-separated list where this comment line is the values
+/// declaration, `#` marker stripped as [`TemplateEntry::comment`] carries
+/// it. `# values: a | b | c` names the values the key takes, in the order
+/// the app offers them, with the default among them; a block carrying no
+/// such line is a key whose value a person types.
+///
+/// One reader for both sides of the line: the scan that parses the list
+/// and [`crate::settings_view`], which keeps the declaration out of the
+/// explainer it shows beside the picker. A second spelling of the prefix
+/// is a second answer to which lines are prose.
+pub fn values_line(said: &str) -> Option<&str> {
+    said.strip_prefix(VALUES_PREFIX)
 }
 
 /// The default one assignment line carries, or `None` where the value is a
