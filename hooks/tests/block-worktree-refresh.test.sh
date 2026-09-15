@@ -113,7 +113,10 @@ MALFORMED="$TMP_ROOT/malformed"
 mkdir -p "$MALFORMED/.git" "$MALFORMED/sub"
 
 # The command is the last field, so read keeps literal pipes in it. printf %b
-# decodes the newline and backslash-newline fixtures without splitting rows.
+# decodes the newline and backslash-newline fixtures without splitting rows,
+# and the octal escapes `\0044`, `\0074` and `\0140` write the dollar sign, the
+# less-than and the backtick a row needs: written literally inside this command
+# substitution, tools/bash32-parse cannot follow the file to its end.
 command_table() {
   local row label expected first command field got before=$((PASS + FAIL))
   echo "=== block-worktree-refresh: command forms from the linked worktree ==="
@@ -168,8 +171,10 @@ directory_table() {
 }
 
 # label|status|first line|command
-# The quoted pair and verb help are refused; the bare source shorthand is
-# not read. These are stated limits, not requests for a tokenizer.
+# The verb is read only where the shell would run it: the rows below vary the
+# command position against a quoted argument, a heredoc body, a comment and
+# the quoted argument of `-c` and `eval`. Verb help is refused and the bare
+# source shorthand is not read; those are stated limits.
 # A `source add` and a `source remove` reach the values `add` and `remove`:
 # the pattern's earlier alternative ends at the same word, and a POSIX match
 # prefers the longer earlier subexpression, so the second word is the verb it
@@ -236,7 +241,26 @@ kendex --help from the worktree passes|0|-|kendex --help
 a command without kendex passes|0|-|git status
 the verb before the kendex word is not the command|0|-|refresh kendex
 the two glued together are another word|0|-|kendexrefresh
-the pair inside a quoted string is refused|2|block-worktree-refresh: refused=refresh|echo "run kendex refresh from main"
+the pair inside a quoted argument is prose, not a command|0|-|echo "run kendex refresh from main"
+the pair inside a heredoc body is fed to a command, not run|0|-|cat <<EOF\nkendex refresh\nEOF
+the pair behind a hash on the line is a comment|0|-|echo hi # kendex refresh
+the quoted argument of -c is command text and is judged|2|block-worktree-refresh: refused=refresh|bash -c "kendex refresh"
+the quoted argument of eval is command text too|2|block-worktree-refresh: refused=apply|eval "kendex apply"
+a sudo before the verb does not hide it|2|block-worktree-refresh: refused=refresh|sudo kendex refresh
+an unquoted eval before the verb does not hide it either|2|block-worktree-refresh: refused=refresh|eval kendex refresh
+nor does a wrapper word the hook was never told about|2|block-worktree-refresh: refused=refresh|timeout 60 kendex refresh
+a here-string fed to a shell is command text|2|block-worktree-refresh: refused=refresh|bash <<< "kendex refresh"
+a heredoc body fed to a shell is command text|2|block-worktree-refresh: refused=refresh|bash <<EOF\nkendex refresh\nEOF
+a redirection target is a file, not the interpreter of one|0|-|cat > script.sh <<EOF\nkendex refresh\nEOF
+a marker only written down arms no heredoc, so the next line is still read|2|block-worktree-refresh: refused=refresh|echo '<<EOF'\nkendex refresh
+a quoted interpreter path still runs what it is given|2|block-worktree-refresh: refused=refresh|"/bin/bash" -c "kendex refresh"
+a quoted eval is still eval|2|block-worktree-refresh: refused=apply|"eval" "kendex apply"
+two escaped quotes are literal arguments and pair with nothing|2|block-worktree-refresh: refused=refresh|echo \\" ; kendex refresh \\"
+a hash after a semicolon begins a comment, so the marker behind it arms nothing|2|block-worktree-refresh: refused=refresh|echo hi;# <<EOF\nkendex refresh\nEOF
+a substitution inside a double-quoted argument runs where it stands|2|block-worktree-refresh: refused=refresh|echo "\0044(kendex refresh)"
+a substitution in a heredoc body the shell expands runs too|2|block-worktree-refresh: refused=refresh|cat \0074\0074EOF\n\0044(kendex refresh)\nEOF
+a quoted delimiter stops the expansion, so the same body is data|0|-|cat \0074\0074'EOF'\n\0044(kendex refresh)\nEOF
+a hash after a backtick begins a comment, so the marker behind it arms nothing|2|block-worktree-refresh: refused=refresh|echo hi \0140# <<EOF\nkendex refresh\nEOF\n\0140
 a help read spelling the verb is refused; kendex --help is the read that passes|2|block-worktree-refresh: refused=refresh|kendex refresh --help
 the bare source shorthand for add is not read: it is every kendex word|0|-|kendex vanillagreencom/kendex
 ROWS
