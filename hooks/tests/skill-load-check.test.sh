@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Tests for the code-quality-load-check hook.
+# Tests for the skill-load-check hook.
 #
-# The hook refuses an Edit, MultiEdit, NotebookEdit or Write onto a path
-# inside a git work tree until the transcript of the agent making the call
-# shows a Skill tool call
-# whose skill input is `code-quality`. Pinned here: the refusal and its value,
+# The hook refuses a call a rule ties to a skill until the transcript of the
+# agent making the call shows a Skill tool call whose skill input names that
+# skill: a markdown edit inside a git work tree needs `docs-writing` and any
+# other edit there `code-quality`, a linear.sh call the shell would run
+# `linear`, and a repository appends rules of its own. Pinned here: the refusal and its value,
 # the pass once the skill is loaded, and what the rule deliberately does not
 # reach — the work tree's own tmp/, a path outside every work tree, and a
 # session that turned the hook off. Pinned beside them, the precision the
@@ -18,7 +19,7 @@
 # Fixtures are throwaway git repositories and hand-written transcripts under a
 # HOME of their own.
 #
-# Every refusal opens with `code-quality-load-check: <key>=<value>`, and that
+# Every refusal opens with `skill-load-check: <key>=<value>`, and that
 # line is the contract: the skill that is not loaded, or why the state could
 # not be read, is the value. The path refused and the skill to load are
 # pinned as themselves under it, and git's own words when it could not answer.
@@ -34,7 +35,7 @@ set -euo pipefail
 unset GIT_DIR GIT_COMMON_DIR GIT_WORK_TREE GIT_INDEX_FILE
 
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-HOOK="${HOOK_UNDER_TEST:-$(cd "$TEST_DIR/.." && pwd)/code-quality-load-check.sh}"
+HOOK="${HOOK_UNDER_TEST:-$(cd "$TEST_DIR/.." && pwd)/skill-load-check.sh}"
 
 PASS=0
 FAIL=0
@@ -91,6 +92,12 @@ run_tool() {
     '{tool_name: $t, tool_input: {($f): $v}, transcript_path: $tr}')"
 }
 
+# The rules a row appends to the default table, empty for the defaults alone,
+# and the copy of the hook a row runs in place of HOOK, empty for HOOK itself.
+RULES_UNDER_TEST=""
+HOOK_AT=""
+HOME_AT=""
+
 # The payload reaches the hook on a here-string, never a pipe: a hook that
 # exits before reading stdin — the off switch here, a no-op mutant under
 # HOOK_UNDER_TEST — SIGPIPEs a writer on the other end, and the pipeline's
@@ -98,10 +105,12 @@ run_tool() {
 run_payload() { # raw-json [PATH] -> rc, stderr in $err
   set +e
   if [ -n "${2:-}" ]; then
-    env -i HOME="$TMP_ROOT" PWD="$TMP_ROOT" PATH="$2" "$BASH_BIN" "$HOOK" \
-      >/dev/null 2>"$ERR_FILE" <<<"$1"
+    env -i HOME="$TMP_ROOT" PWD="$TMP_ROOT" PATH="$2" ${RULES_UNDER_TEST:+"KENDEX_SKILL_LOAD_RULES=$RULES_UNDER_TEST"} \
+      "$BASH_BIN" "$HOOK" >/dev/null 2>"$ERR_FILE" <<<"$1"
   else
-    env HOME="$TMP_ROOT" "$BASH_BIN" "$HOOK" >/dev/null 2>"$ERR_FILE" <<<"$1"
+    env -u KENDEX_SKILL_LOAD_HOOK -u KENDEX_SKILL_LOAD_RULES HOME="${HOME_AT:-$TMP_ROOT}" \
+      ${RULES_UNDER_TEST:+"KENDEX_SKILL_LOAD_RULES=$RULES_UNDER_TEST"} "$BASH_BIN" "${HOOK_AT:-$HOOK}" \
+      >/dev/null 2>"$ERR_FILE" <<<"$1"
   fi
   rc=$?
   set -e
@@ -137,9 +146,9 @@ assert_contains() {
 # shellcheck source=lib/first-line.sh
 . "$TEST_DIR/lib/first-line.sh"
 
-REFUSAL="code-quality-load-check: unloaded=code-quality"
+REFUSAL="skill-load-check: unloaded=code-quality"
 
-echo "code-quality-load-check: an edit in a repository is refused until the skill is loaded"
+echo "skill-load-check: an edit in a repository is refused until the skill is loaded"
 # One row per edit tool, each with the field that tool's payload carries. The
 # transcript holds every mention of the skill that is not a load, so a row
 # that passed here would be a read matching the name rather than the call.
@@ -168,7 +177,7 @@ run_tool Read file_path "$REPO/src/lib.rs" "$NONE_T"
 assert_eq "rc=$rc first=$(first_line)" "rc=2 first=$REFUSAL" \
   "a call is judged by its path, whatever tool the matcher delivered"
 
-echo "code-quality-load-check: the load passes it"
+echo "skill-load-check: the load passes it"
 run_tool Edit file_path "$REPO/src/lib.rs" "$LOADED_T"
 assert_eq "rc=$rc first=$(first_line)" "rc=0 first=-" "a Skill call for code-quality passes the edit, silently"
 MIXED_T="$TMP_ROOT/mixed.jsonl"
@@ -218,7 +227,126 @@ rc=2 first=$REFUSAL|.agents/skills/not-code-quality/SKILL.md|ok
 rc=2 first=$REFUSAL|.agents/skills/code-quality/references/rules.md|ok
 ROWS
 
-echo "code-quality-load-check: a subagent's call is judged by its own transcript"
+echo "skill-load-check: each default rule refuses until its skill is loaded"
+# A transcript holding every mention of a skill that is not a load, then one
+# Skill call per skill named.
+loads() { # FILE SKILL...
+  local file="$1"
+  shift
+  cp "$NONE_T" "$file"
+  for skill in "$@"; do
+    skill_call "$skill" >>"$file"
+  done
+}
+DOCS_T="$TMP_ROOT/docs.jsonl"
+LINEAR_T="$TMP_ROOT/linear.jsonl"
+CQ_ICED_T="$TMP_ROOT/cq-iced.jsonl"
+loads "$DOCS_T" docs-writing
+loads "$LINEAR_T" linear
+loads "$CQ_ICED_T" code-quality iced-rs
+run_bash() { # COMMAND TRANSCRIPT -> rc, stderr in $err
+  run_payload "$("${JQ[@]}" --arg c "$1" --arg tr "$2" '{tool_name:"Bash",tool_input:{command:$c},transcript_path:$tr}')"
+}
+# label|mode|subject|transcript|rules|rc and first line. An edit's subject is a
+# path under the fixture repository, a command's the command; rules `-` is the
+# default table alone. A field holds no `|`.
+rule_table() { # ROWS
+  local label mode subject transcript rules want before=$((PASS + FAIL))
+  while IFS='|' read -r label mode subject transcript rules want; do
+    [ -n "$label" ] || continue
+    [ "$rules" != - ] || rules=""
+    RULES_UNDER_TEST=$rules
+    case "$mode" in
+      edit) run_tool Edit file_path "$REPO/$subject" "$transcript" ;;
+      bash) run_bash "$subject" "$transcript" ;;
+      *) echo "rule_table: no mode named $mode" >&2; exit 2 ;;
+    esac
+    RULES_UNDER_TEST=""
+    assert_eq "rc=$rc first=$(first_line)" "$want" "$label"
+  done <<<"$1"
+  [ "$((PASS + FAIL))" -gt "$before" ] || { echo "rule_table: no row was asserted" >&2; exit 2; }
+}
+LINEAR_CALL='.agents/skills/linear/scripts/linear.sh issues list --state Todo'
+rule_table "\
+a markdown edit with docs-writing loaded and code-quality not passes|edit|docs/guide.md|$DOCS_T|-|rc=0 first=-
+a markdown edit without docs-writing refuses, naming it|edit|docs/guide.md|$LOADED_T|-|rc=2 first=skill-load-check: unloaded=docs-writing
+a source edit with docs-writing loaded and code-quality not refuses, naming code-quality|edit|src/lib.rs|$DOCS_T|-|rc=2 first=skill-load-check: unloaded=code-quality
+a linear.sh read without linear refuses, naming it|bash|$LINEAR_CALL|$NONE_T|-|rc=2 first=skill-load-check: unloaded=linear
+the same call inside a quoted string is no command|bash|echo \"run $LINEAR_CALL\"|$NONE_T|-|rc=0 first=-
+linear.sh as another command's argument is judged as the command it may be|bash|echo /tmp/linear.sh|$NONE_T|-|rc=2 first=skill-load-check: unloaded=linear
+reading the script is judged as the command it may be|bash|cat .agents/skills/linear/scripts/linear.sh|$NONE_T|-|rc=2 first=skill-load-check: unloaded=linear
+linear.sh behind a launcher word without linear refuses, naming it|bash|env $LINEAR_CALL|$NONE_T|-|rc=2 first=skill-load-check: unloaded=linear
+linear.sh run by a shell word without linear refuses, naming it|bash|bash $LINEAR_CALL|$NONE_T|-|rc=2 first=skill-load-check: unloaded=linear
+linear.sh behind a shell option and its value without linear refuses|bash|bash -o posix $LINEAR_CALL|$NONE_T|-|rc=2 first=skill-load-check: unloaded=linear
+linear.sh behind a shell's shopt option and its value without linear refuses|bash|bash -O extglob $LINEAR_CALL|$NONE_T|-|rc=2 first=skill-load-check: unloaded=linear
+linear.sh after an assignment without linear refuses, naming it|bash|LINEAR_TEAM=KEN $LINEAR_CALL|$NONE_T|-|rc=2 first=skill-load-check: unloaded=linear
+a command no rule names passes before any transcript is read|bash|ls -la|$TMP_ROOT/no-such-transcript|-|rc=0 first=-
+a rule the repository appends refuses until its skill is loaded|edit|crates/ui/src/view.rs|$LOADED_T|crates/ui/**/*.rs=iced-rs|rc=2 first=skill-load-check: unloaded=iced-rs
+and passes once it is|edit|crates/ui/src/view.rs|$CQ_ICED_T|crates/ui/**/*.rs=iced-rs|rc=0 first=-
+a command rule the repository appends refuses until its skill is loaded|bash|tools/deploy --prod|$NONE_T|bash:[[:space:]/]deploy[[:space:]]=release|rc=2 first=skill-load-check: unloaded=release
+"
+
+# One edit's load answers every later edit: the hook reads what was loaded,
+# never what it passed before.
+run_tool Edit file_path "$REPO/src/lib.rs" "$LOADED_T"
+FIRST_RC=$rc
+run_tool Write file_path "$REPO/src/other.rs" "$LOADED_T"
+assert_eq "first=$FIRST_RC second=$rc" "first=0 second=0" \
+  "a second edit after one load passes, with no second load recorded"
+run_bash "$LINEAR_CALL" "$LINEAR_T"
+FIRST_RC=$rc
+run_bash '.agents/skills/linear/scripts/linear.sh issues add-relation KEN-1 --blocks KEN-2' "$LINEAR_T"
+assert_eq "first=$FIRST_RC second=$rc" "first=0 second=0" \
+  "a second linear.sh call after one load passes, with no second load recorded"
+
+echo "skill-load-check: a rule it cannot read refuses every call"
+while IFS='|' read -r label entry; do
+  [ -n "$label" ] || continue
+  RULES_UNDER_TEST=$entry
+  run_tool Edit file_path "$REPO/src/lib.rs" "$LOADED_T"
+  RULES_UNDER_TEST=""
+  assert_eq "rc=$rc first=$(first_line)" "rc=2 first=skill-load-check: malformed-rule=$entry" "$label"
+done <<'ROWS'
+an entry with no = refuses|crates/ui/**/*.rs
+an entry whose skill is not a name refuses|crates/ui/**/*.rs=iced rs
+an entry whose regex does not compile refuses|bash:(deploy=release
+ROWS
+
+echo "skill-load-check: a command it cannot read refuses"
+run_payload "$("${JQ[@]}" --arg tr "$NONE_T" '{tool_name:"Bash",tool_input:{},transcript_path:$tr}')"
+assert_eq "rc=$rc first=$(first_line)" "rc=2 first=skill-load-check: payload=no-command" \
+  "a Bash payload naming no command refuses, and names that"
+# The hook alone, with no commit-guards install within reach of it.
+mkdir -p "$TMP_ROOT/lone/hooks"
+cp "$HOOK" "$TMP_ROOT/lone/hooks/skill-load-check.sh"
+HOOK_AT="$TMP_ROOT/lone/hooks/skill-load-check.sh"
+run_bash "$LINEAR_CALL" "$LINEAR_T"
+HOOK_AT=""
+assert_eq "rc=$rc first=$(first_line)" \
+  "rc=2 first=skill-load-check: missing-library=commit-guards/scripts/lib/command-position.sh" \
+  "without commit-guards' command-position library a command is refused, and the value names it"
+# A global Pi install sits four directories under the home, and a harness root
+# a setting relocated sits outside it; both find the library in the home's
+# shared tree.
+mkdir -p "$TMP_ROOT/home/.agents/skills/commit-guards/scripts/lib" \
+  "$TMP_ROOT/home/.pi/agent/kendex/hooks" "$TMP_ROOT/relocated/codex/hooks"
+cp "$(cd "$TEST_DIR/../.." && pwd)/skills/commit-guards/scripts/lib/command-position.sh" \
+  "$TMP_ROOT/home/.agents/skills/commit-guards/scripts/lib/command-position.sh"
+while IFS='|' read -r label at; do
+  [ -n "$label" ] || continue
+  cp "$HOOK" "$TMP_ROOT/$at/skill-load-check.sh"
+  HOOK_AT="$TMP_ROOT/$at/skill-load-check.sh"
+  HOME_AT="$TMP_ROOT/home"
+  run_bash "$LINEAR_CALL" "$LINEAR_T"
+  HOOK_AT=""
+  HOME_AT=""
+  assert_eq "rc=$rc first=$(first_line)" "rc=0 first=-" "$label"
+done <<'ROWS'
+a global Pi install four directories under the home finds the library in the home's shared tree|home/.pi/agent/kendex/hooks
+a harness root relocated out of the home finds the library in the home's shared tree|relocated/codex/hooks
+ROWS
+
+echo "skill-load-check: a subagent's call is judged by its own transcript"
 # The harness names the session's transcript in transcript_path whichever
 # agent made the call, and adds agent_id only for a subagent, whose tool calls
 # it records in `<session>/subagents/agent-<agent_id>.jsonl`. Each world is a
@@ -250,16 +378,16 @@ run_subagent "$TMP_ROOT/session-loaded.jsonl" "$SUBAGENT_ID"
 assert_eq "rc=$rc first=$(first_line)" "rc=2 first=$REFUSAL" \
   "a subagent that did not load the skill is refused, though the session did"
 run_subagent "$TMP_ROOT/session-loaded.jsonl" a7ce49cf892d6e2f5
-assert_eq "rc=$rc first=$(first_line)" "rc=2 first=code-quality-load-check: transcript=unreadable" \
+assert_eq "rc=$rc first=$(first_line)" "rc=2 first=skill-load-check: transcript=unreadable" \
   "an agent_id with no transcript of its own refuses, though the session loaded the skill"
 # A NUL is dropped when the shell reads the id, and what remains here is the
 # loaded subagent's own id: the id is judged before it names a file.
 run_payload "$("${JQ[@]}" --arg p "$REPO/src/lib.rs" --arg tr "$TMP_ROOT/session-unloaded.jsonl" --arg a "$SUBAGENT_ID" \
   '{tool_name:"Edit",tool_input:{file_path:$p},transcript_path:$tr,agent_id:($a[:8] + ([0] | implode) + $a[8:])}')"
-assert_eq "rc=$rc first=$(first_line)" "rc=2 first=code-quality-load-check: payload=invalid-agent-id" \
+assert_eq "rc=$rc first=$(first_line)" "rc=2 first=skill-load-check: payload=invalid-agent-id" \
   "an agent_id holding a NUL refuses, though the id without it names a subagent that loaded the skill"
 
-echo "code-quality-load-check: what the rule does not reach"
+echo "skill-load-check: what the rule does not reach"
 run_tool Write file_path "$REPO/tmp/commit-msg.txt" "$NONE_T"
 assert_eq "rc=$rc first=$(first_line)" "rc=0 first=-" "the work tree's own tmp/ is scratch and passes"
 run_tool Write file_path "$REPO/tmp/deeper/status.md" "$TMP_ROOT/no-such-transcript"
@@ -269,7 +397,7 @@ assert_eq "$rc" 0 "a path outside every work tree passes"
 run_tool Write file_path "$SCRATCH/deeper/not/yet/probe.sh" "$NONE_T"
 assert_eq "$rc" 0 "a path outside every work tree, under directories that do not exist yet, passes"
 set +e
-env -i HOME="$TMP_ROOT" PATH="" KENDEX_CODE_QUALITY_HOOK=off "$BASH_BIN" "$HOOK" \
+env -i HOME="$TMP_ROOT" PATH="" KENDEX_SKILL_LOAD_HOOK=off "$BASH_BIN" "$HOOK" \
   >/dev/null 2>"$ERR_FILE" <<<"$("${JQ[@]}" --arg p "$REPO/src/lib.rs" --arg tr "$NONE_T" \
     '{tool_name:"Edit",tool_input:{file_path:$p},transcript_path:$tr}')"
 rc=$?
@@ -277,29 +405,29 @@ set -e
 assert_eq "rc=$rc first=$(first_line)" "rc=0 first=-" \
   "the off switch passes before the tools it would need are looked for"
 
-echo "code-quality-load-check: a state it cannot read refuses"
+echo "skill-load-check: a state it cannot read refuses"
 run_payload '{"tool_name":"Edit","tool_input":{"file_path":"x"}'
-assert_eq "rc=$rc first=$(first_line)" "rc=2 first=code-quality-load-check: payload=invalid-json" \
+assert_eq "rc=$rc first=$(first_line)" "rc=2 first=skill-load-check: payload=invalid-json" \
   "a truncated JSON payload refuses rather than skipping the guard"
 run_payload '["Edit"]'
 assert_eq "$rc" 2 "a payload that is not an object refuses"
 run_payload "$("${JQ[@]}" --arg tr "$NONE_T" '{tool_name:"Edit",tool_input:{content:"x"},transcript_path:$tr}')"
-assert_eq "rc=$rc first=$(first_line)" "rc=2 first=code-quality-load-check: payload=no-file-path" \
+assert_eq "rc=$rc first=$(first_line)" "rc=2 first=skill-load-check: payload=no-file-path" \
   "a payload naming no target path refuses, and names that"
 run_payload "$("${JQ[@]}" --arg tr "$NONE_T" '{tool_name:"Edit",tool_input:{file_path:7},transcript_path:$tr}')"
 assert_eq "$rc" 2 "a file_path that is not a string refuses"
 run_payload "$("${JQ[@]}" --arg p "$REPO/src/lib.rs" '{tool_name:"Edit",tool_input:{file_path:$p}}')"
-assert_eq "rc=$rc first=$(first_line)" "rc=2 first=code-quality-load-check: payload=no-transcript" \
+assert_eq "rc=$rc first=$(first_line)" "rc=2 first=skill-load-check: payload=no-transcript" \
   "a payload naming no transcript refuses, and names that"
 run_payload "$("${JQ[@]}" --arg p "$REPO/src/lib.rs" '{tool_name:"Edit",tool_input:{file_path:$p},transcript_path:[]}')"
 assert_eq "$rc" 2 "a transcript_path that is not a string refuses"
 run_tool Edit file_path "$REPO/src/lib.rs" "$TMP_ROOT/no-such-transcript"
-assert_eq "rc=$rc first=$(first_line)" "rc=2 first=code-quality-load-check: transcript=unreadable" \
+assert_eq "rc=$rc first=$(first_line)" "rc=2 first=skill-load-check: transcript=unreadable" \
   "a transcript that is not there refuses, and names it"
 run_tool Edit file_path "$REPO/src/lib.rs" "$TMP_ROOT"
 assert_eq "$rc" 2 "a transcript_path naming a directory refuses"
 
-echo "code-quality-load-check: git cannot say where the path is"
+echo "skill-load-check: git cannot say where the path is"
 BROKEN_BIN="$TMP_ROOT/brokengit"
 mkdir -p "$BROKEN_BIN"
 cat >"$BROKEN_BIN/git" <<'EOF'
@@ -314,12 +442,12 @@ env HOME="$TMP_ROOT" PATH="$BROKEN_BIN:$PATH" "$BASH_BIN" "$HOOK" \
     '{tool_name:"Write",tool_input:{file_path:$p},transcript_path:$tr}')"
 rc=$?
 set -e
-assert_eq "rc=$rc first=$(first_line)" "rc=2 first=code-quality-load-check: git=unreadable" \
+assert_eq "rc=$rc first=$(first_line)" "rc=2 first=skill-load-check: git=unreadable" \
   "a git failure that is not 'not a git repository' refuses the edit"
 assert_eq "$(cause_below)" present "the refusal carries git's own failure under the keyed line"
 assert_contains "$(cat "$ERR_FILE")" "unable to read the repository configuration" "and it is git's words"
 
-echo "code-quality-load-check: without the tools it runs"
+echo "skill-load-check: without the tools it runs"
 # One world per declared dependency, each holding every other tool and not
 # that one: the refusal names the missing tool and nothing is judged without
 # it. A row per tool is what keeps the inventory honest — an absent grep does
@@ -338,7 +466,7 @@ tools_table() { # TOOLS
       ln -sf "$real" "$bin/$other"
     done
     run_payload '{"tool_name":"Edit","tool_input":{"file_path":"x"},"transcript_path":"y"}' "$bin"
-    assert_eq "rc=$rc first=$(first_line)" "rc=2 first=code-quality-load-check: missing-tools=$tool" \
+    assert_eq "rc=$rc first=$(first_line)" "rc=2 first=skill-load-check: missing-tools=$tool" \
       "without $tool the call is refused, and the value names it"
   done
   # A world holding none of them: the value is the whole list, in check order.
@@ -348,7 +476,7 @@ tools_table() { # TOOLS
   rm -rf -- "$bin"
   mkdir -p "$bin"
   run_payload '{"tool_name":"Edit","tool_input":{"file_path":"x"},"transcript_path":"y"}' "$bin"
-  assert_eq "rc=$rc first=$(first_line)" "rc=2 first=code-quality-load-check: missing-tools=${1// /,}" \
+  assert_eq "rc=$rc first=$(first_line)" "rc=2 first=skill-load-check: missing-tools=${1// /,}" \
     "with none of them the value is the whole list, in check order"
   [ "$((PASS + FAIL))" -gt "$before" ] || { echo "tools: no row was asserted" >&2; exit 2; }
 }

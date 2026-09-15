@@ -314,6 +314,37 @@ run_payload '{"tool_input":{"command":"kendex refresh"}}' "$NOGIT_BIN"
 assert_eq "rc=$rc first=$(first_line)" 'rc=2 first=block-worktree-refresh: missing-tools=git' \
   'without git the guard refuses rather than skipping, and the value names git alone'
 
+echo "=== block-worktree-refresh: without the command reader it refuses ==="
+# The hook alone, with no commit-guards install within reach of it.
+mkdir -p "$TMP_ROOT/lone/hooks"
+cp "$HOOK" "$TMP_ROOT/lone/hooks/block-worktree-refresh.sh"
+set +e
+json_for 'kendex verify' "$WT" | "$BASH_BIN" "$TMP_ROOT/lone/hooks/block-worktree-refresh.sh" >/dev/null 2>"$ERR_FILE"
+rc=$?
+set -e
+assert_eq "rc=$rc first=$(first_line)" \
+  'rc=2 first=block-worktree-refresh: missing-library=commit-guards/scripts/lib/command-position.sh' \
+  'without the command-position library even a read is refused, and the value names the library'
+# A global Pi install sits four directories under the home, and a harness root
+# a setting relocated sits outside it; both find the reader in the home's
+# shared tree.
+mkdir -p "$HOME/.agents/skills/commit-guards/scripts/lib" "$HOME/.pi/agent/kendex/hooks" \
+  "$TMP_ROOT/relocated/codex/hooks"
+cp "$(cd "$TEST_DIR/../.." && pwd)/skills/commit-guards/scripts/lib/command-position.sh" \
+  "$HOME/.agents/skills/commit-guards/scripts/lib/command-position.sh"
+while IFS='|' read -r label at; do
+  [ -n "$label" ] || continue
+  cp "$HOOK" "$at/block-worktree-refresh.sh"
+  set +e
+  (cd "$WT" && json_for 'kendex verify' "$WT" | "$BASH_BIN" "$at/block-worktree-refresh.sh" >/dev/null 2>"$ERR_FILE")
+  rc=$?
+  set -e
+  assert_eq "rc=$rc first=$(first_line)" 'rc=0 first=-' "$label"
+done <<ROWS
+a global Pi install four directories under the home finds the reader in the home's shared tree|$HOME/.pi/agent/kendex/hooks
+a harness root relocated out of the home finds the reader in the home's shared tree|$TMP_ROOT/relocated/codex/hooks
+ROWS
+
 echo
 echo "block-worktree-refresh: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

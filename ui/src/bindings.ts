@@ -1521,6 +1521,18 @@ export type Customizations_Deserialize = {
 	"skill-instructions"?: { [key in string]: string },
 	/**  `[agent-frontmatter.<harness>.<agent>]`, as the manifest stores it. */
 	"agent-frontmatter"?: { [key in string]: { [key in string]: FrontmatterOverrides_Deserialize } },
+	/**
+	 *  The environment `[hooks.<name>]` sets for its script, by hook name.
+	 * 
+	 *  A customization rather than a member field, because it is written
+	 *  where the other customizations are written: the declaration an
+	 *  install produces is built by the add, which carries no per-item
+	 *  environment, so both the marketplace path and the copy path leave
+	 *  it unset and `install::carry_customizations` puts it on afterwards.
+	 *  A hook installed without it runs its script with none of the
+	 *  variables the originating project's declaration set.
+	 */
+	"hook-env"?: { [key in string]: { [key in string]: string } },
 };
 
 /**
@@ -1537,6 +1549,18 @@ export type Customizations_Serialize = {
 	"skill-instructions"?: { [key in string]: string },
 	/**  `[agent-frontmatter.<harness>.<agent>]`, as the manifest stores it. */
 	"agent-frontmatter"?: { [key in string]: { [key in string]: FrontmatterOverrides_Serialize } },
+	/**
+	 *  The environment `[hooks.<name>]` sets for its script, by hook name.
+	 * 
+	 *  A customization rather than a member field, because it is written
+	 *  where the other customizations are written: the declaration an
+	 *  install produces is built by the add, which carries no per-item
+	 *  environment, so both the marketplace path and the copy path leave
+	 *  it unset and `install::carry_customizations` puts it on afterwards.
+	 *  A hook installed without it runs its script with none of the
+	 *  variables the originating project's declaration set.
+	 */
+	"hook-env"?: { [key in string]: { [key in string]: string } },
 };
 
 /**
@@ -2621,6 +2645,12 @@ export type ItemDecl_Deserialize = {
 	 */
 	rev?: string | null,
 	enabled?: boolean,
+	/**
+	 *  A hook's environment: each entry becomes an assignment ahead of the
+	 *  script in the command its registration runs. Read on `[hooks.<name>]`
+	 *  alone; validation refuses it on every other table.
+	 */
+	env?: { [key in string]: string } | null,
 };
 
 /**  One declared item: `[agents.<name>]` / `[skills.<name>]`. */
@@ -2637,6 +2667,12 @@ export type ItemDecl_Serialize = {
 	 */
 	rev?: string | null,
 	enabled?: boolean,
+	/**
+	 *  A hook's environment: each entry becomes an assignment ahead of the
+	 *  script in the command its registration runs. Read on `[hooks.<name>]`
+	 *  alone; validation refuses it on every other table.
+	 */
+	env?: { [key in string]: string } | null,
 };
 
 export type ItemKind = "agent" | "skill" | "hook" | "command" | "mcp-server" | "plugin" | "pi-extension";

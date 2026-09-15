@@ -225,9 +225,9 @@ export function registerRendered(root: string, listener: string, matcher: string
  * It appends the payload it read to `log`, writes `stderr`, and exits
  * `exitCode` — so the log proves the spawn happened and carries what the
  * extension sent. */
-export function renderStub(project: string, name: string, opts: { exitCode: number; stderr?: string; log: string }): void {
+export function renderStub(project: string, name: string, opts: StubOptions, env: Record<string, string> = {}): void {
 	writeStub(renderedHookPath(project, name), opts);
-	registerProjectHook(project, name);
+	registerProjectHook(project, name, env);
 }
 
 /** `crates/core/src`, from this package. */
@@ -264,35 +264,88 @@ function braces(text: string): string {
 	return text.replaceAll("\u0001", "{").replaceAll("\u0002", "}");
 }
 
+/** A value as `crate::names::quoted` spells it for the shell. */
+function quoted(value: string): string {
+	return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
 /**
- * The command `engine::targets::project_command` writes for `rel`, rendered
- * from that function rather than spelled again here. A rename or a
- * respelling on the Rust side throws, which is the whole point: a carrier
- * that reads a command kendex no longer writes is every project hook
- * silently off.
+ * The words `engine::targets::assignments` writes for `env`, rendered from
+ * that function's own template in key order — empty for a hook whose
+ * declaration sets nothing. Both command shapes take their assignments from
+ * here, because both take them from that one function in the Rust.
  */
-export function projectCommand(rel: string): string {
-	const command = rustFormat(rustBody("engine/targets.rs", "fn project_command(rel: &str) -> String {"), "project_command");
-	return braces(command.replace("{}", `'${rel.replaceAll("'", "'\\''")}'`));
+function assignmentsOf(env: Record<string, string>): string {
+	const entry = rustFormat(rustBody("engine/targets.rs", "fn assignments(vars: Option<&BTreeMap<String, String>>) -> String {"), "assignments");
+	return Object.entries(env)
+		.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+		.map(([key, value]) => entry.replace("{key}", key).replace("{}", quoted(value)))
+		.join("");
 }
 
-/** The registration kendex writes for a project-scope hook, command and all. */
-export function registerProjectHook(project: string, name: string): void {
-	registerRendered(join(project, ".pi"), "tool_call", "Bash", projectCommand(`.pi/kendex/hooks/${name}.sh`));
+/**
+ * The command `engine::targets::project_command` writes for `rel` and a hook
+ * whose declaration sets `env`, rendered from that function rather than
+ * spelled again here. Its template takes the quoted path, then the
+ * environment's assignments, which are empty for a hook that declares none. A
+ * rename, a respelling or a template taking another argument on the Rust side
+ * throws, which is the whole point: a carrier that reads a command kendex no
+ * longer writes is every project hook silently off.
+ */
+export function projectCommand(rel: string, env: Record<string, string> = {}): string {
+	const command = rustFormat(
+		rustBody("engine/targets.rs", "fn project_command(rel: &str, vars: Option<&BTreeMap<String, String>>) -> String {"),
+		"project_command",
+	);
+	const slots = command.split("{}");
+	if (slots.length !== 3) throw new Error(`project_command's template takes ${slots.length - 1} arguments, not the path and the assignments`);
+	const [head, middle, tail] = slots as [string, string, string];
+	return braces(`${head}${quoted(rel)}${middle}${assignmentsOf(env)}${tail}`);
 }
 
-export function renderUserStub(userRoot: string, name: string, opts: { exitCode: number; stderr?: string; log: string }): void {
+/**
+ * The command `engine::targets::direct_command` writes for a global hook at
+ * `path` whose declaration sets `env`, rendered from that function and from
+ * `assignments` rather than spelled again here: the no-environment arm for an
+ * empty `env`, the binding arm with each entry assigned in key order for any
+ * other. A value is quoted as `names::quoted` quotes it. A placeholder left
+ * unfilled throws, so a template taking another argument cannot pass unread.
+ */
+export function globalCommand(path: string, env: Record<string, string> = {}): string {
+	const body = rustBody("engine/targets.rs", "fn direct_command(path: &str, vars: Option<&BTreeMap<String, String>>) -> String {");
+	const set = assignmentsOf(env);
+	const template = rustFormat(set === "" ? body : body.slice(body.lastIndexOf("format!(")), "direct_command");
+	const command = template.replace("{path}", path).replace("{set}", set);
+	const unfilled = /\{[a-z]*\}/.exec(command);
+	if (unfilled !== null) throw new Error(`direct_command's template holds ${unfilled[0]}, which this rendering does not fill`);
+	return braces(command);
+}
+
+/** The registration kendex writes for a project-scope hook, command and all.
+ * `env` is what the hook's declaration sets for its script, empty for one that
+ * declares none. */
+export function registerProjectHook(project: string, name: string, env: Record<string, string> = {}): void {
+	registerRendered(join(project, ".pi"), "tool_call", "Bash", projectCommand(`.pi/kendex/hooks/${name}.sh`, env));
+}
+
+export function renderUserStub(userRoot: string, name: string, opts: StubOptions, env: Record<string, string> = {}): void {
 	const script = join(userRoot, "kendex", "hooks", `${name}.sh`);
 	writeStub(script, opts);
-	registerRendered(userRoot, "tool_call", "Bash", `bash "${script}"`);
+	registerRendered(userRoot, "tool_call", "Bash", globalCommand(script, env));
 }
 
-function writeStub(path: string, opts: { exitCode: number; stderr?: string; log: string }): void {
+/** `reportEnv` names an environment variable the stub appends to its log as
+ * `<NAME>=[<value>]`, empty brackets where the spawn set none — for a case
+ * whose subject is the environment a registration asks for. */
+export interface StubOptions { exitCode: number; stderr?: string; log: string; reportEnv?: string }
+
+function writeStub(path: string, opts: StubOptions): void {
 	mkdirSync(join(path, ".."), { recursive: true });
 	writeFileSync(path, [
 		"#!/usr/bin/env bash",
 		"set -euo pipefail",
 		`cat >> ${JSON.stringify(opts.log)}`,
+		...(opts.reportEnv ? [`printf '${opts.reportEnv}=[%s]\\n' "\${${opts.reportEnv}:-}" >> ${JSON.stringify(opts.log)}`] : []),
 		...(opts.stderr ? [`echo ${JSON.stringify(opts.stderr)} >&2`] : []),
 		`exit ${opts.exitCode}`,
 	].join("\n") + "\n");
