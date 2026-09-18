@@ -72,9 +72,16 @@ function piSettingsPaths(cwd = process.cwd()): string[] {
 
 let cachedPackageConfig: { packageId: string; fingerprint: string; merged: Record<string, unknown> } | undefined;
 
+/** Per candidate: path + stat stamp, so two roots can never share a cache entry. */
+function settingsFingerprint(packageId: string, settingsPaths: string[]): string {
+	return JSON.stringify([packageId, ...settingsPaths.map((settingsPath) => {
+		try { const { mtimeMs, size } = statSync(settingsPath); return [settingsPath, mtimeMs, size]; } catch { return [settingsPath, "missing"]; }
+	})]);
+}
+
 export function readPackageConfig(packageId: string, cwd?: string): Record<string, unknown> {
 	const settingsPaths = piSettingsPaths(cwd);
-	const fingerprint = `${packageId} ${settingsPaths.map((settingsPath) => { try { const stats = statSync(settingsPath); return `${stats.mtimeMs}:${stats.size}`; } catch { return "missing"; } }).join(" ")}`;
+	const fingerprint = settingsFingerprint(packageId, settingsPaths);
 	if (cachedPackageConfig && cachedPackageConfig.packageId === packageId && cachedPackageConfig.fingerprint === fingerprint) return cachedPackageConfig.merged;
 	const merged: Record<string, unknown> = {};
 	for (const settingsPath of settingsPaths) {
